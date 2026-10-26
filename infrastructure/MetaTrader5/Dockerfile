@@ -51,7 +51,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NOVNC_PORT=8080 \
     VNC_DESKTOP_NAME=Metatrader5 \
     VNC_GEOMETRY=1280x800 \
-    MT5_TERMINAL=/opt/wineprefix/drive_c/Program Files/MetaTrader 5/terminal64.exe \
+    MT5_TERMINAL="/opt/wineprefix/drive_c/Program Files/MetaTrader 5/terminal64.exe" \
     WINPY=C:\\Python311\\python.exe \
     MT5_ACCOUNT_NUMBER="" \
     MT5_PASSWORD="" \
@@ -76,10 +76,13 @@ RUN dpkg --add-architecture i386 \
     && rm -rf /var/lib/apt/lists/*
 
 # --- virtual desktop, web front end, supervisor ---------------------------------
+# xauth is not optional: xvfb-run refuses to start without it, and every wine
+# command in this file runs under xvfb-run.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        xvfb x11vnc openbox supervisor novnc websockify \
+        xvfb xauth x11vnc openbox supervisor novnc websockify \
         curl procps cabextract fonts-dejavu-core fonts-liberation \
+        libgl1-mesa-dri libglx-mesa0 \
     && rm -rf /var/lib/apt/lists/*
 
 # --- a fresh 64-bit prefix ------------------------------------------------------
