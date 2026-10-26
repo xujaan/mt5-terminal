@@ -1,0 +1,160 @@
+# MetaTrader 5 terminal for Kubernetes.
+#
+# Image: ghcr.io/xujaan/mt5-python-wine (same build also pushed to
+#        docker.io/xujaan/mt5-python-wine when the repo secrets are set)
+#        -- Wine 11 + MT5 + rpyc :1234 + noVNC :8080
+#
+# Apply with:  kubectl apply -f mt5-deployment.yaml
+#
+# Before the pod can log in to a broker you need the credentials secret:
+#
+#   kubectl -n third-party create secret generic mt5-credentials \
+#     --from-literal=MT5_ACCOUNT_NUMBER='12345678' \
+#     --from-literal=MT5_PASSWORD='...' \
+#     --from-literal=MT5_SERVER='Broker-Server-01'
+#
+# It is referenced as optional, so the pod still starts without it -- it just
+# comes up logged out and you finish the login through the web desktop.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mt5-bot
+  namespace: third-party
+  labels:
+    app: mt5
+spec:
+  replicas: 1
+  # Wine plus a running terminal does not like being restarted under a live
+  # session; Recreate keeps exactly one terminal owning the prefix.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mt5
+  template:
+    metadata:
+      labels:
+        app: mt5
+    spec:
+      containers:
+        - name: mt5-container
+          image: ghcr.io/xujaan/mt5-python-wine:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: vnc-web
+            - containerPort: 1234
+              name: python-rpyc
+          envFrom:
+            - secretRef:
+                name: mt5-credentials
+                optional: true
+          env:
+            # 1280x800 keeps the whole terminal usable in a browser tab; raise
+            # it if you want more charts side by side (costs memory).
+            - name: VNC_GEOMETRY
+              value: "1280x800"
+            - name: SERVER_PORT
+              value: "1234"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          # noVNC answering is the cheapest honest signal that X, VNC and the
+          # terminal are all up; the image's own healthcheck does the same.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 45
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 8
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 120
+            periodSeconds: 60
+            failureThreshold: 5
+          volumeMounts:
+            # Wine and MT5 use shared memory for window surfaces; the default
+            # 64 MB /dev/shm of a container is not enough for a busy terminal.
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
+      # The prefix is writable, so give the terminal a moment to flush on stop.
+      terminationGracePeriodSeconds: 30
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mt5-svc
+  namespace: third-party
+spec:
+  type: ClusterIP
+  selector:
+    app: mt5
+  ports:
+    - name: vnc-web
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+    - name: python-rpyc
+      protocol: TCP
+      port: 1234
+      targetPort: 1234
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: basic-auth
+  namespace: third-party
+type: Opaque
+data:
+  # htpasswd -nb admin 'Trader@gon3t' | base64 -w 0
+  #
+  # NOTE: the value that used to be here decoded to
+  #   "admin:$apr1$Owd2EV9g$CmgPdZbMR6KA9GMOWuoVX.\n\n"
+  # i.e. it carried a second, blank line. nginx parses the auth file line by
+  # line, so an empty line is at best noise and at worst a 500 on every request.
+  # Same user, same password, one trailing newline.
+  auth: YWRtaW46JGFwcjEkT3dkMkVWOWckQ21nUGRaYk1SNktBOUdNT1d1b1ZYLgo=
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mt5-ingress
+  namespace: third-party
+  annotations:
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: basic-auth
+    nginx.ingress.kubernetes.io/auth-realm: "Authentication Required"
+    # noVNC holds one long-lived WebSocket for the whole session. Without these
+    # the default 60s proxy timeout closes the desktop every minute.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: mt5.gnt.my.id
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mt5-svc
+                port:
+                  number: 8080

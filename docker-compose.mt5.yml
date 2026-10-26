@@ -1,0 +1,16 @@
+version: '3.8'
+services:
+  app:
+    container_name: metatrader-terminal
+    image: fortesenselabs/metatrader-sockets:5
+    restart: unless-stopped
+    ports:
+      - '5900:5900'
+      - '8000:8000'
+    volumes:
+      - fortesenselabsmt:/data
+ 
+      
+volumes:
+  fortesenselabsmt: {}
+

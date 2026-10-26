@@ -1,0 +1,22 @@
+services:
+  metatrader5:
+    image: ghcr.io/xujaan/mt5-python-wine:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"   # noVNC web desktop
+      - "1234:1234"   # rpyc (do not publish this past your own network)
+    environment:
+      MT5_ACCOUNT_NUMBER: ${MT5_ACCOUNT_NUMBER}
+      MT5_PASSWORD: ${MT5_PASSWORD}
+      MT5_SERVER: ${MT5_SERVER}
+    volumes:
+      # terminal state: saved logins, charts, downloaded history
+      - mt5data:/opt/wineprefix/drive_c/users/root/AppData/Roaming/MetaQuotes
+    # Wine and MT5 need more shared memory than the 64 MB container default.
+    shm_size: "256m"
+    restart: unless-stopped
+
+volumes:
+  mt5data: {}

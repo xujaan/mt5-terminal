@@ -1,0 +1,185 @@
+name: build mt5 wine image
+
+# Builds infrastructure/MetaTrader5 on GitHub's runners instead of on a laptop.
+# That is not just convenience: the build installs WineHQ, a Windows Python and
+# the full MT5 terminal, which needs ~4 GB of layers and several GB of bandwidth.
+#
+# Pushes:
+#   ghcr.io/<owner>/mt5-python-wine  -- always, using the built-in GITHUB_TOKEN
+#   docker.io/<owner>/mt5-python-wine -- when DOCKERHUB_USERNAME and
+#                                        DOCKERHUB_TOKEN repository secrets exist
+#
+# The smoke-test job pulls the image that was just pushed and proves it runs:
+# wine version, MT5 binary present, noVNC answering on 8080, rpyc accepting a
+# connection on 1234, Windows Python importing MetaTrader5. Pushing an image is
+# not evidence that the image works; this job is.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infrastructure/MetaTrader5/**"
+      - ".github/workflows/build-mt5-wine.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "infrastructure/MetaTrader5/**"
+      - ".github/workflows/build-mt5-wine.yml"
+  workflow_dispatch:
+
+env:
+  IMAGE_GHCR: ghcr.io/${{ github.repository_owner }}/mt5-python-wine
+  IMAGE_HUB: docker.io/${{ github.repository_owner }}/mt5-python-wine
+  DOCKER_BUILDKIT: "1"
+
+jobs:
+  build:
+    name: build and push
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tags: ${{ steps.meta.outputs.tags }}
+      ghcr_ref: ${{ steps.meta.outputs.ghcr_ref }}
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
+                     /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        if: ${{ env.DOCKERHUB_TOKEN != '' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          GHCR_REF="${IMAGE_GHCR}:${GITHUB_SHA}"
+          TAGS="${IMAGE_GHCR}:latest,${IMAGE_GHCR}:wine11,${GHCR_REF}"
+          if [ -n "${DOCKERHUB_TOKEN}" ]; then
+            TAGS="${TAGS},${IMAGE_HUB}:latest,${IMAGE_HUB}:wine11,${IMAGE_HUB}:${GITHUB_SHA}"
+            echo "Docker Hub push: enabled"
+          else
+            echo "Docker Hub push: skipped (no DOCKERHUB_TOKEN secret)"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "ghcr_ref=${GHCR_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: infrastructure/MetaTrader5
+          file: infrastructure/MetaTrader5/Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  smoke:
+    name: smoke test the pushed image
+    needs: build
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                     /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull the image that was just pushed
+        run: docker pull "${{ needs.build.outputs.ghcr_ref }}"
+
+      - name: Start the container the way the k8s manifest does
+        run: |
+          docker run -d --name mt5 \
+            -p 8080:8080 -p 1234:1234 \
+            "${{ needs.build.outputs.ghcr_ref }}"
+
+      - name: Wait for noVNC on 8080
+        run: |
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 http://127.0.0.1:8080/ || true)
+            echo "attempt $i: HTTP ${code:-none}"
+            [ "$code" = "200" ] && exit 0
+            sleep 5
+          done
+          echo "noVNC never answered on 8080"
+          docker logs mt5 || true
+          exit 1
+
+      - name: Assert wine, MT5, Windows Python and rpyc
+        run: |
+          set -euo pipefail
+          echo "--- wine version (must be >= 8) ---"
+          docker exec mt5 wine --version | tee /tmp/wine.txt
+          ver=$(sed -E 's/wine-([0-9]+)\..*/\1/' /tmp/wine.txt)
+          [ "$ver" -ge 8 ] || { echo "wine $ver is older than 8"; exit 1; }
+
+          echo "--- MT5 terminal binary ---"
+          docker exec mt5 sh -c 'ls -l "$MT5_TERMINAL"'
+
+          echo "--- terminal process ---"
+          docker exec mt5 pgrep -fa terminal64.exe || {
+            echo "terminal64.exe is not running"; docker logs mt5; exit 1; }
+
+          echo "--- Windows interpreter imports the API ---"
+          docker exec mt5 wine "C:\\Python311\\python.exe" -c \
+            "import MetaTrader5 as m, rpyc; print('MetaTrader5', m.__version__, 'rpyc', rpyc.__version__)"
+
+          echo "--- rpyc accepts a connection on 1234 ---"
+          python3 - <<'PY'
+          import socket
+          s = socket.create_connection(("127.0.0.1", 1234), timeout=15)
+          s.close()
+          print("rpyc port open")
+          PY
+
+      - name: Container logs
+        if: always()
+        run: docker logs mt5 2>&1 | tail -100
+
+      - name: Stop the container
+        if: always()
+        run: docker rm -f mt5 || true

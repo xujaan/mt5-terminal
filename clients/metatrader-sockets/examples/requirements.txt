@@ -1,0 +1,3 @@
+pandas
+pytz
+metatrader-sockets-client

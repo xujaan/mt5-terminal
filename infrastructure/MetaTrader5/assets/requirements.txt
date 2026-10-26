@@ -1,0 +1,13 @@
+# Installed into the *Windows* interpreter inside the wine prefix, so every entry
+# must publish a win_amd64 wheel. The previous file pinned numpy 1.21 / pandas
+# 1.4 / pyparsing 2.4.7 for the old Python 3.9 image; those have no wheels for
+# 3.11 and are four years of bug fixes behind.
+#
+# vncdotool is intentionally absent: it was only needed by the VNC-typing login
+# script, which auto_login.py replaced with the MetaTrader5 API.
+MetaTrader5>=5.0.45
+rpyc>=6.0,<7
+plumbum>=1.8
+numpy>=1.26
+pandas>=2.2
+python-dotenv>=1.0
